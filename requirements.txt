@@ -9,7 +9,7 @@ cmdstanpy
 colorama
 contourpy
 cycler
-fastapi0.
+fastapi
 flatbuffers
 fonttools
 gast
@@ -24,7 +24,7 @@ joblib
 keras
 kiwisolver
 libclang
-markdow
+markdown
 markdown-it-py
 markupsafe
 matplotlib
