@@ -458,14 +458,14 @@ async def list_available_regions(
         }
 
 @app.post("/api/forecast/regional_demand", response_model=List[CropForecastResponse])
-def forecast_regional_demand(request: CropForecastRequest):
+async def forecast_regional_demand(
+    request: CropForecastRequest,
+    forecaster: CropForecastingModule = Depends(get_forecasting_module)
+):
     """
     Generate crop production forecasts for a specific region
     """
     try:
-        # Initialize the forecaster
-        forecaster = CropForecastingModule(config.PROCESSED_DATA_PATH)
-        
         # Get regional forecasts
         forecast_results = forecaster.forecast_regional_demand(
             region=request.region, 
@@ -492,7 +492,7 @@ def forecast_regional_demand(request: CropForecastRequest):
         
         return formatted_results
     except Exception as e:
-        logging.error(f"Error in forecast_regional_demand: {str(e)}")
+        print(f"Error in forecast_regional_demand: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Forecast generation failed: {str(e)}")
 
 if __name__ == "__main__":

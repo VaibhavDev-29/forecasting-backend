@@ -636,6 +636,89 @@ class BiharForecastingModule:
         
         return crop_calendar
 
+    def forecast_regional_demand(self, region=None, top_n=5, periods=5):
+        """Forecast demand for top N crops in a specific region/district of Bihar"""
+        if self.processed_data is None:
+            self.preprocess_data()
+            
+        # Filter data by district if specified
+        if region:
+            district_data = self.processed_data[self.processed_data['District'] == region]
+            if len(district_data) == 0:
+                print(f"District '{region}' not found in data. Using all available crop data.")
+                district_data = self.processed_data
+        else:
+            district_data = self.processed_data
+            
+        # List of terms to exclude from crop names
+        exclude_terms = ['buxar', 'bhojpur', 'bhagalpur', 'bihar', 'district', 'total', 'araria', 'arwal', 'aurangabad']
+            
+        # Get top crops by production
+        # Ensure Production column is numeric
+        district_data['Production'] = pd.to_numeric(district_data['Production'], errors='coerce')
+        top_crops = district_data.groupby('Crop')['Production'].sum().nlargest(top_n)
+        
+        # Filter out any district/region names that got into crops
+        top_crops = top_crops[~top_crops.index.str.lower().str.contains('|'.join(exclude_terms), case=False, na=False)]
+        
+        print(f"Top {len(top_crops)} crops in {region if region else 'Bihar'}: {', '.join(top_crops.index)}")
+        
+        results = {}
+        for crop in top_crops.index:
+            try:
+                # Generate ensemble forecast for this crop
+                ensemble_forecast, forecast_index, _ = self.ensemble_forecast(crop, region, 'Production', periods)
+                
+                # Only add to results if forecast was successfully generated
+                if ensemble_forecast is not None and forecast_index is not None:
+                    results[crop] = {
+                        'forecast': ensemble_forecast,
+                        'years': forecast_index
+                    }
+            except Exception as e:
+                print(f"Failed to generate forecast for {crop}: {str(e)}")
+                continue
+                
+        # If we couldn't generate forecasts for any crop, try with a simpler approach
+        if not results:
+            for crop in top_crops.index:
+                try:
+                    # Get historical data for this crop
+                    crop_data = district_data[district_data['Crop'] == crop]
+                    
+                    # Calculate average yearly increase
+                    if len(crop_data) > 1:
+                        yearly_data = crop_data.groupby('Year')['Production'].mean()
+                        years = sorted(yearly_data.index)
+                        
+                        if len(years) >= 2:
+                            # Simple trending forecast
+                            last_value = yearly_data[years[-1]]
+                            avg_increase = (yearly_data[years[-1]] - yearly_data[years[0]]) / (years[-1] - years[0])
+                            
+                            # Generate forecast
+                            forecast_values = []
+                            forecast_years = []
+                            
+                            for i in range(1, periods + 1):
+                                forecast_year = years[-1] + i
+                                forecast_value = last_value + (avg_increase * i)
+                                # Ensure no negative values
+                                forecast_value = max(0, forecast_value)
+                                
+                                forecast_values.append(forecast_value)
+                                forecast_years.append(forecast_year)
+                                
+                            results[crop] = {
+                                'forecast': forecast_values,
+                                'years': forecast_years
+                            }
+                except Exception as e:
+                    print(f"Failed to generate simple forecast for {crop}: {str(e)}")
+                    continue
+        
+        return results
+
 def run_bihar_forecasting_demo(output_dir="outputs"):
     """Run a demonstration of the Bihar forecasting capabilities"""
     # Create output directory if it doesn't exist
