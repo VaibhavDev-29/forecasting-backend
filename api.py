@@ -421,16 +421,41 @@ async def list_available_crops(
         )
 
 @app.get("/regions", tags=["Regional Information"])
-async def list_available_regions():
+async def list_available_regions(
+    forecaster: CropForecastingModule = Depends(get_forecasting_module)
+):
     """
     Get a list of all available regions in the system.
     """
-    # In this demo, we only have Buxar district
-    return {
-        "status": "success",
-        "regions": ["Buxar"],
-        "count": 1
-    }
+    try:
+        # Hard-code the districts from Bihar since the extraction is having issues
+        bihar_districts = [
+            "Araria", "Arwal", "Aurangabad", "Banka", "Begusarai",
+            "Bhagalpur", "Bhojpur", "Buxar", "Darbhanga", "East Champaran",
+            "Gaya", "Gopalganj", "Jamui", "Jehanabad", "Kaimur",
+            "Katihar", "Khagaria", "Kishanganj", "Lakhisarai", "Madhepura",
+            "Madhubani", "Munger", "Muzaffarpur", "Nalanda", "Nawada",
+            "Patna", "Purnia", "Rohtas", "Saharsa", "Samastipur",
+            "Saran", "Sheikhpura", "Sheohar", "Sitamarhi", "Siwan",
+            "Supaul", "Vaishali", "West Champaran"
+        ]
+        
+        print(f"Returning {len(bihar_districts)} districts")
+        
+        return {
+            "status": "success",
+            "regions": bihar_districts,
+            "count": len(bihar_districts)
+        }
+    except Exception as e:
+        print(f"Error in list_available_regions: {str(e)}")
+        # Always return at least Buxar as a fallback
+        return {
+            "status": "error",
+            "message": f"Failed to retrieve regions: {str(e)}",
+            "regions": ["Buxar"],
+            "count": 1
+        }
 
 @app.post("/api/forecast/regional_demand", response_model=List[CropForecastResponse])
 def forecast_regional_demand(request: CropForecastRequest):
