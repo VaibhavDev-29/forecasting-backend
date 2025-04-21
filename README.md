@@ -328,4 +328,82 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - Food and Agricultural Organization (FAO) for agricultural data
 - Open Weather Map for weather data
-- Farmer organizations for domain expertise and feedback 
+- Farmer organizations for domain expertise and feedback
+
+## FairChain Crop Forecasting API
+
+This project provides an AI-powered API for crop forecasting and optimal crop recommendations focused on Bihar agriculture.
+
+### Features
+
+- Crop yield and production forecasting using multiple AI models
+- Optimal crop recommendation based on region-specific data
+- Crop calendar information for planting and harvesting planning
+- Market price forecasting
+- Regional demand forecasting
+
+### Requirements
+
+- Python 3.8+
+- Docker (for containerized deployment)
+
+### Running with Docker
+
+The application can be easily run using Docker:
+
+#### Using Docker Compose (Recommended)
+
+```bash
+# Build and start the container
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+```
+
+#### Using Docker directly
+
+```bash
+# Build the Docker image
+docker build -t forecasting-api .
+
+# Run the container
+docker run -p 8000:8000 forecasting-api
+```
+
+### API Endpoints
+
+Once the application is running, you can access:
+
+- API Documentation: http://localhost:8000/docs
+- Main endpoints:
+  - `/forecast/crop` - Crop forecasting
+  - `/recommend/optimal-crops` - Optimal crop recommendations
+  - `/crop-calendar` - Planting and harvesting information
+  - `/market-prices/{crop_name}` - Market price forecasting
+  - `/crops` - List of available crops
+  - `/regions` - List of available regions
+
+### Development Setup
+
+If you want to run the application without Docker:
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the application
+uvicorn api:app --reload
+```
+
+### Architecture
+
+The system consists of:
+- FastAPI backend providing RESTful endpoints
+- Multiple AI forecasting models:
+  - Prophet
+  - SARIMA
+  - XGBoost
+  - LSTM (when TensorFlow is available)
+- Ensemble forecasting for improved accuracy
+- Bihar-specific agricultural data processing 
