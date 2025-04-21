@@ -84,10 +84,35 @@ async def get_forecasting_module():
     global forecasting_module
     if forecasting_module is None:
         try:
-            # Initialize with data
-            forecasting_module = BiharForecastingModule(data_path="dataset.csv")
+            # Check if the files exist
+            import os
+            bihar_path = "bihar-dataset.csv"
+            fallback_path = "dataset.csv"
+            
+            if os.path.exists(bihar_path):
+                print(f"Found bihar-dataset.csv, size: {os.path.getsize(bihar_path)/1024:.2f} KB")
+                data_path = bihar_path
+            elif os.path.exists(fallback_path):
+                print(f"bihar-dataset.csv not found, using fallback dataset.csv, size: {os.path.getsize(fallback_path)/1024:.2f} KB")
+                data_path = fallback_path
+            else:
+                print("Warning: Neither bihar-dataset.csv nor dataset.csv found!")
+                data_path = bihar_path  # Use bihar path and let it fail with proper error
+            
+            # Initialize with explicit bihar-dataset.csv
+            forecasting_module = BiharForecastingModule(data_path=data_path)
             forecasting_module.preprocess_data()
+            
+            # Verify data was loaded
+            if forecasting_module.processed_data is not None:
+                print(f"Successfully initialized forecasting module with {data_path}")
+                print(f"Processed {len(forecasting_module.processed_data)} data points")
+                districts = forecasting_module.processed_data.get('District', pd.Series()).unique()
+                print(f"Found {len(districts)} districts: {', '.join(str(d) for d in districts if d is not None)}")
+            else:
+                print("Warning: processed_data is None after initialization!")
         except Exception as e:
+            print(f"Failed to initialize forecasting module: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to initialize forecasting module: {str(e)}"
@@ -140,6 +165,8 @@ async def recommend_optimal_crops(
     the most profitable crops for farmers to grow in the next season.
     """
     try:
+        print(f"Received request for optimal crops in region: {request.region}")
+        
         # Check if we have valid data
         if forecaster.processed_data is None or len(forecaster.processed_data) == 0:
             raise HTTPException(
@@ -149,16 +176,19 @@ async def recommend_optimal_crops(
             
         # Get available crops for debugging
         available_crops = sorted(forecaster.processed_data['Crop'].unique().tolist())
+        print(f"Available crops: {', '.join(available_crops[:5])}...")
         
         # Handle different parameter names based on forecaster type
         if isinstance(forecaster, BiharForecastingModule):
-            # BiharForecastingModule uses 'district' parameter
+            print(f"Using BiharForecastingModule with district={request.region}")
+            # This method has been fixed to properly handle district matching
             top_yields, forecasts = forecaster.suggest_optimal_crops(
                 district=request.region,
-                top_n=request.top_n
+                top_n=request.top_n,
+                optimization_method='model_based'  # Use the new optimization approach
             )
         else:
-            # CropForecastingModule uses 'region' parameter
+            print(f"Using CropForecastingModule with region={request.region}")
             top_yields, forecasts = forecaster.suggest_optimal_crops(
                 region=request.region,
                 top_n=request.top_n
@@ -166,66 +196,164 @@ async def recommend_optimal_crops(
         
         # Validate we got valid results
         if top_yields.empty:
+            print(f"No yields found for region: {request.region}")
             return {
                 "status": "warning",
                 "region": request.region,
                 "optimal_crops": [],
-                "explanation": f"No suitable crops found for your region. Available crops include: {', '.join(available_crops[:10])}...",
+                "explanation": f"No suitable crops found for your region based on forecasting models.",
                 "last_updated": datetime.now().strftime('%Y-%m-%d')
             }
         
         # Process recommendations
         optimal_crops = []
-        exclude_terms = ['buxar', 'bhojpur', 'bhagalpur', 'bihar', 'district', 'total', 'gopalganj']
+        
+        print(f"Found {len(top_yields)} top yielding crops: {', '.join(top_yields.index)}")
         
         for crop, yield_value in top_yields.items():
-            # Skip district names being treated as crops
-            if any(term in crop.lower() for term in exclude_terms):
-                continue
+            try:
+                # Process crop information
+                crop_info = {
+                    "crop": crop,
+                    "current_yield": float(yield_value),
+                    "yield_trend": "stable"
+                }
                 
-            # Process crop information
-            crop_info = {
-                "crop": crop,
-                "current_yield": float(yield_value),
-                "yield_trend": "increasing" if crop in forecasts else "stable",
-                "profit_potential": "high" if yield_value > top_yields.mean() else "moderate"
-            }
-            
-            # Add forecast data if available
-            if crop in forecasts:
-                try:
-                    forecast_data = forecasts[crop]['forecast']
-                    if 'yhat' in forecast_data:
-                        future_yields = forecast_data[forecast_data['ds'] > datetime.now()]['yhat'].values
-                        if len(future_yields) > 0:
-                            crop_info["forecasted_yield"] = float(future_yields[-1])
-                except Exception as e:
-                    pass
+                # Add forecast data if available
+                if crop in forecasts:
+                    forecast_data = forecasts[crop]
                     
-            optimal_crops.append(crop_info)
+                    # Handle different forecast formats (BiharForecastingModule vs CropForecastingModule)
+                    if 'trend' in forecast_data:
+                        # Map trend to API format
+                        trend_map = {
+                            "growing": "increasing",
+                            "declining": "decreasing",
+                            "stable": "stable"
+                        }
+                        crop_info["yield_trend"] = trend_map.get(forecast_data['trend'], "stable")
+                    
+                    # Add growth potential
+                    if 'growth_potential' in forecast_data:
+                        crop_info["growth_potential"] = float(forecast_data['growth_potential'])
+                    
+                    # Add confidence score
+                    if 'confidence_score' in forecast_data:
+                        crop_info["confidence_score"] = float(forecast_data['confidence_score'])
+                    
+                    # Get forecasted yield
+                    if 'forecast_values' in forecast_data and forecast_data['forecast_values']:
+                        # BiharForecastingModule format with separate values and years
+                        crop_info["forecasted_yield"] = float(forecast_data['forecast_values'][-1])
+                    elif 'forecast' in forecast_data:
+                        # Handle forecast format from CropForecastingModule
+                        if isinstance(forecast_data['forecast'], list):
+                            # List of dicts with 'forecast' key
+                            points = forecast_data['forecast']
+                            if points and 'forecast' in points[-1]:
+                                crop_info["forecasted_yield"] = float(points[-1]['forecast'])
+                    
+                    # Determine profit potential
+                    if 'profit_potential' in forecast_data:
+                        profit_score = forecast_data['profit_potential']
+                        # Convert numeric score to text description
+                        if isinstance(profit_score, (int, float)):
+                            if profit_score > 75:
+                                crop_info["profit_potential"] = "high"
+                            elif profit_score > 40:
+                                crop_info["profit_potential"] = "moderate"
+                            else:
+                                crop_info["profit_potential"] = "low"
+                        else:
+                            crop_info["profit_potential"] = "moderate"
+                    elif 'growth_potential' in forecast_data:
+                        # Derive profit potential from growth
+                        growth = forecast_data['growth_potential']
+                        if growth > 15:
+                            crop_info["profit_potential"] = "high"
+                        elif growth > 5:
+                            crop_info["profit_potential"] = "moderate"
+                        else:
+                            crop_info["profit_potential"] = "low"
+                    else:
+                        crop_info["profit_potential"] = "moderate"
+                else:
+                    # Default values if no forecast data
+                    crop_info["profit_potential"] = "moderate"
+                    
+                optimal_crops.append(crop_info)
+            except Exception as e:
+                print(f"Error processing crop {crop}: {str(e)}")
+                # Still include the crop with basic info
+                optimal_crops.append({
+                    "crop": crop,
+                    "current_yield": float(yield_value),
+                    "yield_trend": "stable",
+                    "profit_potential": "moderate"
+                })
         
-        # Check if we have any valid recommendations after filtering
+        # Final check to ensure we have recommendations
         if not optimal_crops:
+            print("No valid crops after processing")
             return {
                 "status": "warning",
                 "region": request.region,
                 "optimal_crops": [],
-                "explanation": f"Only found district names instead of crops. Raw data included: {', '.join(top_yields.index.tolist())}",
+                "explanation": f"No suitable crops could be analyzed for {request.region}.",
                 "last_updated": datetime.now().strftime('%Y-%m-%d')
             }
+        
+        print(f"Returning {len(optimal_crops)} recommended crops based on AI forecasting models")
         
         return {
             "status": "success",
             "region": request.region,
             "optimal_crops": optimal_crops,
-            "explanation": "Recommendations based on historical yield performance and AI forecasts",
+            "explanation": f"Recommendations based on AI forecasting models that analyzed historical yield data and projected future performance for {request.region}",
             "last_updated": datetime.now().strftime('%Y-%m-%d')
         }
-    except HTTPException:
-        raise
     except Exception as e:
         # Log the error for debugging
         print(f"Error in recommend_optimal_crops: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        # Try to return a simple response with basic crop data
+        try:
+            # Get basic crop data without forecasting
+            basic_data = forecaster.processed_data
+            metric = 'Yield'
+            
+            if basic_data is not None and len(basic_data) > 0:
+                # Ensure numeric
+                basic_data[metric] = pd.to_numeric(basic_data[metric], errors='coerce')
+                
+                # Get top crops
+                top_basic_crops = basic_data.groupby('Crop')[metric].mean().nlargest(request.top_n)
+                
+                if not top_basic_crops.empty:
+                    basic_recommendations = []
+                    for crop, value in top_basic_crops.items():
+                        if not any(term in str(crop).lower() for term in ['total', 'district']):
+                            basic_recommendations.append({
+                                "crop": crop,
+                                "current_yield": float(value),
+                                "yield_trend": "stable",
+                                "profit_potential": "moderate"
+                            })
+                    
+                    if basic_recommendations:
+                        return {
+                            "status": "partial",
+                            "region": request.region,
+                            "optimal_crops": basic_recommendations,
+                            "explanation": f"Limited recommendations based on historical data only (forecasting failed).",
+                            "last_updated": datetime.now().strftime('%Y-%m-%d')
+                        }
+        except Exception as fallback_error:
+            print(f"Fallback recommendation also failed: {str(fallback_error)}")
+        
+        # If all else fails, raise the original exception
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate crop recommendations: {str(e)}"

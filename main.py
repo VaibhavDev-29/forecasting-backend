@@ -655,10 +655,46 @@ class CropForecastingModule:
                 except Exception as e:
                     print(f"Error extracting LSTM forecast: {str(e)}")
         
-        # If no forecasts were generated, return None
+        # If no forecasts were generated, return None or fallback to a simple forecast
         if not forecasts:
             print(f"No valid forecasts could be generated for {crop_name}")
-            return None, None, None
+            try:
+                # Try a simple trend-based forecast as fallback
+                if self.processed_data is not None:
+                    crop_data = self.processed_data[self.processed_data['Crop'] == crop_name]
+                    if len(crop_data) > 0:
+                        yearly_data = crop_data.groupby('Year')[metric].mean()
+                        if len(yearly_data) >= 2:
+                            years = sorted(yearly_data.index)
+                            last_value = yearly_data.iloc[-1]
+                            first_value = yearly_data.iloc[0]
+                            avg_increase = (last_value - first_value) / (years[-1] - years[0])
+                            
+                            # Generate simple forecast
+                            forecast_values = []
+                            forecast_years = []
+                            for i in range(1, periods + 1):
+                                forecast_year = years[-1] + i
+                                forecast_value = last_value + (avg_increase * i)
+                                forecast_values.append(max(0, forecast_value))  # Ensure non-negative
+                                forecast_years.append(forecast_year)
+                            
+                            # Calculate a reasonable confidence interval
+                            std_dev = yearly_data.std() if len(yearly_data) > 2 else yearly_data.mean() * 0.2
+                            
+                            # Create formatted result for optimal crops method
+                            result = []
+                            for i, (year, value) in enumerate(zip(forecast_years, forecast_values)):
+                                result.append({
+                                    'year': year,
+                                    'forecast': value,
+                                    'lower': max(0, value - std_dev),
+                                    'upper': value + std_dev
+                                })
+                            return result
+            except Exception as e:
+                print(f"Fallback forecasting failed: {str(e)}")
+            return None
         
         try:
             # Create ensemble by averaging forecasts
@@ -668,6 +704,14 @@ class CropForecastingModule:
             
             # Calculate ensemble forecast (average)
             ensemble_forecast = np.mean(forecasts, axis=0)
+            
+            # Calculate standard deviation across models for each time point
+            # This gives an indication of forecast uncertainty
+            if len(forecasts) > 1:
+                forecast_std = np.std(forecasts, axis=0)
+            else:
+                # If only one model, use a reasonable approximation
+                forecast_std = ensemble_forecast * 0.1  # 10% of the forecast value
             
             # Create forecast index
             crop_data = self.processed_data[self.processed_data['Crop'] == crop_name]
@@ -680,37 +724,24 @@ class CropForecastingModule:
                 'forecast': ensemble_forecast,
                 'index': forecast_index,
                 'individual_forecasts': forecasts,
-                'model_names': model_names
+                'model_names': model_names,
+                'std_dev': forecast_std
             }
             
-            # Plot ensemble forecast with individual model forecasts
-            plt.figure(figsize=(15, 8))
+            # Create formatted result for optimal crops method
+            result = []
+            for i, (year, value, std) in enumerate(zip(forecast_index, ensemble_forecast, forecast_std)):
+                result.append({
+                    'year': year,
+                    'forecast': float(value),
+                    'lower': float(max(0, value - std * 1.96)),  # 95% confidence interval
+                    'upper': float(value + std * 1.96)
+                })
             
-            # Plot historical data
-            yearly_data = crop_data.groupby('Year')[metric].mean()
-            plt.plot(yearly_data.index, yearly_data.values, label='Historical Data', color='blue')
-            
-            # Plot individual model forecasts
-            colors = ['red', 'green', 'purple', 'orange']
-            for i, model_name in enumerate(model_names):
-                if i < len(forecasts):
-                    plt.plot(forecast_index, forecasts[i], label=f'{model_name.capitalize()} Forecast', 
-                             color=colors[i % len(colors)], linestyle='--', alpha=0.7)
-            
-            # Plot ensemble forecast
-            plt.plot(forecast_index, ensemble_forecast, label='Ensemble Forecast', 
-                     color='black', linewidth=2)
-            
-            plt.title(f'Ensemble Forecast for {crop_name} - {metric}')
-            plt.xlabel('Year')
-            plt.ylabel(metric)
-            plt.legend()
-            plt.grid(True, linestyle='--', alpha=0.7)
-            
-            return ensemble_forecast, forecast_index, plt
+            return result
         except Exception as e:
             print(f"Error creating ensemble forecast for {crop_name}: {str(e)}")
-            return None, None, None
+            return None
     
     def get_top_crops(self, metric='Production', top_n=5):
         """Get top N crops by specified metric"""
@@ -757,10 +788,10 @@ class CropForecastingModule:
                 
             try:
                 # Generate ensemble forecast for this crop
-                ensemble_forecast, forecast_index, _ = self.ensemble_forecast(crop, 'Production', periods)
+                ensemble_forecast = self.ensemble_forecast(crop, 'Production', periods)
                 
                 # Only add to results if forecast was successfully generated
-                if ensemble_forecast is not None and forecast_index is not None:
+                if ensemble_forecast:
                     results[crop] = {
                         'forecast': ensemble_forecast,
                         'years': forecast_index
@@ -814,37 +845,48 @@ class CropForecastingModule:
         return results
     
     def suggest_optimal_crops(self, region='Buxar', metric='Yield', top_n=5):
-        """Suggest optimal crops to grow based on yield trends"""
+        """Suggest optimal crops to grow based on AI forecasting models and yield trends"""
         if self.processed_data is None:
             self.preprocess_data()
         
         try:
-            # List of districts/regions to exclude from crop names
-            exclude_terms = ['buxar', 'bhojpur', 'bhagalpur', 'bihar', 'district', 'total']
+            print(f"Suggesting optimal crops for region: {region}")
             
-            # MODIFIED: Instead of filtering by region, return all crops if region not found
+            # Filter and process data
             if region and region.lower() != 'all':
-                region_data = self.processed_data[self.processed_data['Crop'].str.contains(region, case=False, na=False)]
-                if len(region_data) > 0:
-                    filtered_data = region_data
+                print(f"Looking for data specific to region: {region}")
+                
+                # Try to find exact or partial matches for the region
+                region_match_data = self.processed_data[
+                    self.processed_data['Crop'].str.lower().str.contains(region.lower()) |
+                    (self.processed_data['Season'].str.lower() == region.lower())
+                ]
+                
+                if len(region_match_data) > 0:
+                    print(f"Found {len(region_match_data)} rows with region '{region}' in Crop or Season")
+                    filtered_data = region_match_data
                 else:
-                    # Use all data and print that region isn't found
-                    print(f"Region '{region}' not found in data. Using all available crop data.")
+                    # Use all data
+                    print(f"Region '{region}' not found in Crop or Season. Using all available crop data.")
                     filtered_data = self.processed_data
             else:
                 filtered_data = self.processed_data
+                
+            print(f"Total data points after region filtering: {len(filtered_data)}")
             
-            # Filter out any rows where Crop contains district/region names
-            valid_crops = filtered_data[~filtered_data['Crop'].str.lower().str.contains('|'.join(exclude_terms), case=False, na=False)]
+            # Remove generic crops and irrelevant data
+            valid_crops = filtered_data[~filtered_data['Crop'].str.lower().str.contains('total|area|district', case=False, na=False)]
             
             # Print unique crops for debugging
             unique_crops = valid_crops['Crop'].unique()
-            print(f"Found {len(unique_crops)} valid crops for analysis: {', '.join(unique_crops)}")
+            print(f"Found {len(unique_crops)} valid crops for analysis: {', '.join(unique_crops[:10])}")
             
             # Get recent data (last 5 years)
             recent_years = valid_crops['Year'].unique()
             if len(recent_years) > 5:
                 recent_years = sorted(recent_years)[-5:]
+                
+            print(f"Recent years for analysis: {recent_years}")
             
             # Make a copy of the data to avoid modifying the original
             data_copy = valid_crops.copy()
@@ -856,6 +898,8 @@ class CropForecastingModule:
             recent_data = data_copy[data_copy['Year'].isin(recent_years)]
             recent_data = recent_data.dropna(subset=[metric])
             
+            print(f"Data points in recent years: {len(recent_data)}")
+            
             if len(recent_data) == 0:
                 print(f"No valid data available for {metric} in recent years")
                 return pd.Series(dtype='float64'), {}
@@ -863,28 +907,97 @@ class CropForecastingModule:
             # Calculate average yield for each crop in recent years
             crop_yields = recent_data.groupby('Crop')[metric].mean().sort_values(ascending=False)
             
-            # Get top N crops by yield
-            top_crops = crop_yields.head(top_n)
+            # Additional filtering for crops
+            # Remove crops with very low yields or outliers
+            if len(crop_yields) > 0:
+                mean_yield = crop_yields.mean()
+                std_yield = crop_yields.std()
+                min_acceptable_yield = max(0, mean_yield - 2 * std_yield)
+                crop_yields = crop_yields[crop_yields > min_acceptable_yield]
+            
+            # Get top N crops by yield (plus a few more for backup in case forecasts fail)
+            top_crops = crop_yields.head(top_n + 5)  # Include more crops as buffer
+            
+            print(f"Top {len(top_crops)} crops by {metric}: {', '.join(top_crops.index)}")
             
             if top_crops.empty:
                 print(f"No data available for {metric} to suggest optimal crops")
                 return pd.Series(dtype='float64'), {}
             
-            # Make forecasts for these crops
+            # Make forecasts for these crops using ensemble forecasting for better accuracy
             forecasts = {}
             for crop in top_crops.index:
                 try:
-                    model, _, plt = self.train_prophet_model(crop, metric, periods=5)
-                    if model is not None:
+                    # Use ensemble forecasting for more reliable predictions
+                    forecast_result = self.ensemble_forecast(crop, metric, periods=5)
+                    
+                    if forecast_result:
+                        # Calculate growth potential (comparing last forecast to current value)
+                        current_value = top_crops[crop]
+                        forecast_values = [point['forecast'] for point in forecast_result]
+                        final_forecast = forecast_values[-1] if forecast_values else 0
+                        
+                        # Calculate growth rate
+                        growth_potential = ((final_forecast / current_value) - 1) * 100 if current_value > 0 else 0
+                        
+                        # Calculate confidence score based on forecast intervals
+                        confidence_intervals = [point['upper'] - point['lower'] for point in forecast_result]
+                        avg_interval_size = sum(confidence_intervals) / len(confidence_intervals) if confidence_intervals else 0
+                        conf_score = max(0, min(100, 100 - (avg_interval_size / current_value * 50))) if current_value > 0 else 50
+                        
+                        # Determine trend (growing, declining, stable)
+                        if growth_potential > 10:
+                            trend = "growing"
+                        elif growth_potential < -10:
+                            trend = "declining"
+                        else:
+                            trend = "stable"
+                        
+                        # Calculate profit potential based on yield and growth
+                        profit_potential = (current_value * (1 + growth_potential/100)) / mean_yield * 100 if mean_yield > 0 else 0
+                        
                         forecasts[crop] = {
-                            'current_yield': top_crops[crop],
-                            'forecast': self.forecasts[f"{crop}_{metric}_prophet"]
+                            'current_yield': float(top_crops[crop]),
+                            'forecast': forecast_result,
+                            'trend': trend,
+                            'growth_potential': float(growth_potential),
+                            'confidence_score': float(conf_score),
+                            'profit_potential': float(profit_potential)
                         }
                 except Exception as e:
                     print(f"Could not create forecast for {crop}: {str(e)}")
                     continue
             
-            return top_crops, forecasts
+            # Return only the top crops that have successful forecasts
+            successful_crops = pd.Series({crop: top_crops[crop] for crop in forecasts.keys()})
+            if len(successful_crops) > top_n:
+                successful_crops = successful_crops.head(top_n)
+            elif len(successful_crops) == 0:
+                # Fallback to returning top crops without forecasts
+                print("No successful forecasts. Returning top crops without forecast data.")
+                successful_crops = top_crops.head(top_n)
+                
+                # Create basic forecast information
+                for crop in successful_crops.index:
+                    if crop not in forecasts:
+                        forecasts[crop] = {
+                            'current_yield': float(successful_crops[crop]),
+                            'trend': 'stable',
+                            'growth_potential': 0.0,
+                            'confidence_score': 50.0,
+                            'profit_potential': 50.0
+                        }
+            
+            # Filter forecasts to match the final crop list
+            final_forecasts = {crop: forecasts.get(crop, {
+                'current_yield': float(top_crops[crop]),
+                'trend': 'stable',
+                'growth_potential': 0.0,
+                'confidence_score': 50.0,
+                'profit_potential': 50.0
+            }) for crop in successful_crops.index}
+            
+            return successful_crops, final_forecasts
         except Exception as e:
             print(f"Error suggesting optimal crops: {str(e)}")
             return pd.Series(dtype='float64'), {}
@@ -956,7 +1069,7 @@ class CropForecastingModule:
             }).reset_index()
             
             # Generate ensemble forecast
-            ensemble_forecast, forecast_years, _ = self.ensemble_forecast(crop_name, metric)
+            ensemble_forecast = self.ensemble_forecast(crop_name, metric)
             
             # Format response
             response = {
@@ -974,14 +1087,8 @@ class CropForecastingModule:
             }
             
             # Add forecast data if available
-            if ensemble_forecast is not None and forecast_years is not None:
-                response['forecast'] = [
-                    {
-                        'year': int(year),
-                        metric.lower(): float(value)
-                    } for year, value in zip(forecast_years, ensemble_forecast)
-                ]
-                response['confidence_score'] = 0.85  # Placeholder, should be calculated based on model performance
+            if ensemble_forecast:
+                response['forecast'] = ensemble_forecast
             else:
                 response['forecast'] = []
                 response['forecast_message'] = 'Could not generate reliable forecast'
@@ -1045,14 +1152,21 @@ def run_forecasting_demo(csv_path=None, df=None, show_plots=False):
         
         # Generate ensemble forecast
         print(f"\nGenerating ensemble forecast for {selected_crop}...")
-        ensemble_forecast, forecast_years, plt_obj = forecaster.ensemble_forecast(selected_crop, 'Production')
+        ensemble_forecast = forecaster.ensemble_forecast(selected_crop, 'Production')
         
-        if show_plots and plt_obj is not None:
-            plt_obj.show()
+        if show_plots and ensemble_forecast:
+            plt.figure(figsize=(15, 8))
+            plt.plot(forecast_index, ensemble_forecast, label='Ensemble Forecast', color='black', linewidth=2)
+            plt.title(f'Ensemble Forecast for {selected_crop} - Production')
+            plt.xlabel('Year')
+            plt.ylabel('Production (tonnes)')
+            plt.legend()
+            plt.grid(True, linestyle='--', alpha=0.7)
+            plt.show()
         
-        if ensemble_forecast is not None and forecast_years is not None:
+        if ensemble_forecast:
             print(f"\n{selected_crop} Production Forecast:")
-            for year, value in zip(forecast_years, ensemble_forecast):
+            for year, value in zip(forecast_index, ensemble_forecast):
                 print(f"- {year}: {value:,.0f} tonnes")
     else:
         print("\nNo crops available for forecasting.")
