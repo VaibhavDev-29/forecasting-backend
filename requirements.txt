@@ -64,7 +64,6 @@ tqdm
 typing-extensions
 typing-inspection
 tzdata
-urllib
 uvicorn
 werkzeug
 wheel
